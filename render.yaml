@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: wordpress-ai-agent
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python agent.py"
+    envVars:
+      - key: AI_MODE
+        value: huggingface
+      - key: HF_API_KEY
+        sync: false
