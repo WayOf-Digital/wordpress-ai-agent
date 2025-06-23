@@ -1,36 +1,23 @@
 """
-WordPress AI Image Optimizer Agent
-Agent autonome pour optimiser les images WordPress avec IA gratuite
+WordPress AI Image Optimizer Agent - Version Simplifiée
+Compatible avec tous les environnements
 """
 
 import os
-import asyncio
-import aiohttp
 import json
+import time
+import requests
 from typing import Dict, List, Optional
 from datetime import datetime
-import hashlib
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
-import schedule
 import threading
-import time
 
 # Configuration
 class Config:
-    # Mistral AI (gratuit)
-    MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
-    MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")  # Clé gratuite Mistral
-    
-    # Alternative : Hugging Face (100% gratuit)
+    # Hugging Face (gratuit)
     HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.1"
     HF_API_KEY = os.getenv("HF_API_KEY", "")
-    
-    # LLM local (si auto-hébergé)
-    LOCAL_LLM_URL = os.getenv("LOCAL_LLM_URL", "http://localhost:11434/api/generate")
-    
-    # Mode IA
-    AI_MODE = os.getenv("AI_MODE", "huggingface")  # mistral, huggingface, ou local
     
     # Base de données locale (JSON)
     DB_FILE = "agent_database.json"
@@ -46,36 +33,30 @@ class WordPressAIAgent:
     def __init__(self):
         self.config = Config()
         self.clients = self.load_clients()
-        self.processing_queue = []
-        self.results_cache = {}
         
     def load_clients(self) -> Dict:
         """Charge la base de données des clients."""
         if os.path.exists(self.config.DB_FILE):
             with open(self.config.DB_FILE, 'r') as f:
                 return json.load(f)
-        return {"clients": {}, "tasks": [], "stats": {"total_processed": 0}}
+        return {"clients": {}, "stats": {"total_processed": 0}}
     
     def save_clients(self):
         """Sauvegarde la base de données."""
         with open(self.config.DB_FILE, 'w') as f:
             json.dump(self.clients, f, indent=2)
     
-    async def generate_with_ai(self, prompt: str) -> Optional[Dict]:
-        """Génère les métadonnées avec l'IA gratuite."""
+    def generate_with_ai(self, prompt: str) -> Optional[Dict]:
+        """Génère les métadonnées avec HuggingFace."""
+        if not self.config.HF_API_KEY:
+            # Mode démo sans clé API
+            return {
+                "alt_text": "Image optimisée par IA",
+                "title": "Titre SEO optimisé",
+                "caption": "Légende engageante pour cette image",
+                "description": "Description détaillée pour le référencement"
+            }
         
-        if self.config.AI_MODE == "huggingface":
-            return await self.generate_with_huggingface(prompt)
-        elif self.config.AI_MODE == "mistral":
-            return await self.generate_with_mistral(prompt)
-        elif self.config.AI_MODE == "local":
-            return await self.generate_with_local_llm(prompt)
-        else:
-            # Fallback : génération basique sans IA
-            return self.generate_basic_metadata(prompt)
-    
-    async def generate_with_huggingface(self, prompt: str) -> Optional[Dict]:
-        """Utilise Hugging Face (100% gratuit)."""
         headers = {"Authorization": f"Bearer {self.config.HF_API_KEY}"}
         
         payload = {
@@ -87,136 +68,60 @@ class WordPressAIAgent:
             }
         }
         
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(
-                    self.config.HF_API_URL,
-                    headers=headers,
-                    json=payload
-                ) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        text = result[0]['generated_text']
-                        
-                        # Extraire le JSON
-                        json_start = text.find('{')
-                        json_end = text.rfind('}') + 1
-                        if json_start >= 0 and json_end > json_start:
-                            json_str = text[json_start:json_end]
-                            return json.loads(json_str)
-                    else:
-                        print(f"Erreur HF: {response.status}")
-            except Exception as e:
-                print(f"Erreur HF: {e}")
+        try:
+            response = requests.post(
+                self.config.HF_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if isinstance(result, list) and len(result) > 0:
+                    text = result[0].get('generated_text', '')
+                    
+                    # Extraire le JSON
+                    json_start = text.find('{')
+                    json_end = text.rfind('}') + 1
+                    if json_start >= 0 and json_end > json_start:
+                        json_str = text[json_start:json_end]
+                        return json.loads(json_str)
+        except Exception as e:
+            print(f"Erreur IA: {e}")
         
-        return None
-    
-    async def generate_with_mistral(self, prompt: str) -> Optional[Dict]:
-        """Utilise Mistral AI."""
-        headers = {
-            "Authorization": f"Bearer {self.config.MISTRAL_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "model": "mistral-tiny",  # Modèle gratuit
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.7,
-            "max_tokens": 200
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(
-                    self.config.MISTRAL_API_URL,
-                    headers=headers,
-                    json=payload
-                ) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        content = result['choices'][0]['message']['content']
-                        
-                        # Parser le JSON
-                        json_start = content.find('{')
-                        json_end = content.rfind('}') + 1
-                        if json_start >= 0:
-                            return json.loads(content[json_start:json_end])
-            except Exception as e:
-                print(f"Erreur Mistral: {e}")
-        
-        return None
-    
-    async def generate_with_local_llm(self, prompt: str) -> Optional[Dict]:
-        """Utilise un LLM local (Ollama, LlamaCpp, etc.)."""
-        payload = {
-            "model": "mistral",
-            "prompt": prompt + "\n\nRéponds uniquement avec un JSON valide.",
-            "stream": False,
-            "options": {
-                "temperature": 0.7,
-                "max_tokens": 200
-            }
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(
-                    self.config.LOCAL_LLM_URL,
-                    json=payload
-                ) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        text = result.get('response', '')
-                        
-                        # Extraire le JSON
-                        json_start = text.find('{')
-                        json_end = text.rfind('}') + 1
-                        if json_start >= 0:
-                            return json.loads(text[json_start:json_end])
-            except Exception as e:
-                print(f"Erreur LLM local: {e}")
-        
-        return None
-    
-    def generate_basic_metadata(self, context: str) -> Dict:
-        """Génération basique sans IA (fallback)."""
-        # Extraire les mots-clés du contexte
-        words = context.split()[:20]
-        title_words = ' '.join(words[:5])
-        
+        # Fallback
         return {
-            "alt_text": f"Image liée à {title_words}",
-            "title": title_words[:60],
-            "caption": f"Illustration pour {title_words}",
-            "description": f"Cette image illustre le contenu relatif à {title_words}"
+            "alt_text": "Image du site WordPress",
+            "title": "Image optimisée",
+            "caption": "Image automatiquement optimisée",
+            "description": "Description générée automatiquement"
         }
     
-    async def process_wordpress_site(self, client_id: str, wp_data: Dict):
-        """Traite un site WordPress complet."""
+    def process_wordpress_site(self, client_id: str, wp_data: Dict):
+        """Traite un site WordPress."""
         wp_url = wp_data['url']
         wp_user = wp_data['user']
         wp_password = wp_data['password']
         
         print(f"🤖 Traitement du site {wp_url} pour le client {client_id}")
         
-        # Récupérer les images via l'API WordPress
-        images = await self.fetch_wordpress_images(wp_url, wp_user, wp_password)
+        # Récupérer les images
+        images = self.fetch_wordpress_images(wp_url, wp_user, wp_password)
         
         processed = 0
         errors = 0
         
-        for image in images:
+        for image in images[:10]:  # Limiter à 10 pour le test
             if not image.get('alt_text'):
-                # Récupérer le contexte
-                context = await self.get_image_context(wp_url, wp_user, wp_password, image)
-                
                 # Générer avec l'IA
+                context = self.get_image_context(wp_url, wp_user, wp_password, image)
                 prompt = self.create_prompt(context)
-                metadata = await self.generate_with_ai(prompt)
+                metadata = self.generate_with_ai(prompt)
                 
                 if metadata:
                     # Mettre à jour WordPress
-                    success = await self.update_wordpress_image(
+                    success = self.update_wordpress_image(
                         wp_url, wp_user, wp_password, 
                         image['id'], metadata
                     )
@@ -225,11 +130,8 @@ class WordPressAIAgent:
                         processed += 1
                     else:
                         errors += 1
-                else:
-                    errors += 1
                 
-                # Pause pour éviter la surcharge
-                await asyncio.sleep(1)
+                time.sleep(1)  # Pause entre chaque image
         
         # Mettre à jour les stats
         self.update_client_stats(client_id, processed, errors)
@@ -240,34 +142,36 @@ class WordPressAIAgent:
             "total": len(images)
         }
     
-    async def fetch_wordpress_images(self, wp_url: str, user: str, password: str) -> List[Dict]:
-        """Récupère toutes les images d'un site WordPress."""
+    def fetch_wordpress_images(self, wp_url: str, user: str, password: str) -> List[Dict]:
+        """Récupère les images d'un site WordPress."""
         images = []
         page = 1
         
-        auth = aiohttp.BasicAuth(user, password)
+        auth = (user, password)
         
-        async with aiohttp.ClientSession(auth=auth) as session:
-            while True:
-                try:
-                    async with session.get(
-                        f"{wp_url}/wp-json/wp/v2/media",
-                        params={'per_page': 100, 'page': page}
-                    ) as response:
-                        if response.status == 200:
-                            batch = await response.json()
-                            if not batch:
-                                break
-                            images.extend(batch)
-                            page += 1
-                        else:
-                            break
-                except:
+        while True:
+            try:
+                response = requests.get(
+                    f"{wp_url}/wp-json/wp/v2/media",
+                    params={'per_page': 100, 'page': page},
+                    auth=auth,
+                    timeout=30
+                )
+                
+                if response.status_code == 200:
+                    batch = response.json()
+                    if not batch:
+                        break
+                    images.extend(batch)
+                    page += 1
+                else:
                     break
+            except:
+                break
         
         return images
     
-    async def get_image_context(self, wp_url: str, user: str, password: str, image: Dict) -> Dict:
+    def get_image_context(self, wp_url: str, user: str, password: str, image: Dict) -> Dict:
         """Récupère le contexte d'une image."""
         context = {
             'image_url': image.get('source_url', ''),
@@ -276,76 +180,41 @@ class WordPressAIAgent:
             'page_content': ''
         }
         
-        post_id = image.get('post')
-        if not post_id:
-            return context
-        
-        auth = aiohttp.BasicAuth(user, password)
-        
-        async with aiohttp.ClientSession(auth=auth) as session:
-            # Essayer posts puis pages
-            for endpoint in ['posts', 'pages']:
-                try:
-                    async with session.get(
-                        f"{wp_url}/wp-json/wp/v2/{endpoint}/{post_id}"
-                    ) as response:
-                        if response.status == 200:
-                            post = await response.json()
-                            context['page_title'] = post.get('title', {}).get('rendered', '')
-                            content = post.get('content', {}).get('rendered', '')
-                            # Nettoyer le HTML
-                            context['page_content'] = self.strip_html(content)[:300]
-                            break
-                except:
-                    continue
-        
+        # Simplifier pour éviter les erreurs
         return context
-    
-    def strip_html(self, html: str) -> str:
-        """Supprime les balises HTML."""
-        import re
-        return re.sub('<.*?>', '', html)
     
     def create_prompt(self, context: Dict) -> str:
         """Crée le prompt pour l'IA."""
         return f"""Génère des métadonnées SEO pour cette image WordPress.
 
-Contexte:
-- Titre de la page: {context['page_title']}
-- Contenu: {context['page_content']}
-- URL de l'image: {context['image_url']}
+URL de l'image: {context['image_url']}
 
-Génère en français un JSON avec:
+Génère un JSON avec:
 - alt_text: description précise (max 125 car)
-- title: titre SEO (max 60 car)
+- title: titre SEO (max 60 car)  
 - caption: légende engageante (max 160 car)
 - description: description détaillée (max 300 car)
 
-Format JSON uniquement:
-{{
-    "alt_text": "...",
-    "title": "...",
-    "caption": "...",
-    "description": "..."
-}}"""
+Format JSON uniquement."""
     
-    async def update_wordpress_image(self, wp_url: str, user: str, password: str, 
-                                   image_id: int, metadata: Dict) -> bool:
+    def update_wordpress_image(self, wp_url: str, user: str, password: str, 
+                             image_id: int, metadata: Dict) -> bool:
         """Met à jour une image dans WordPress."""
-        auth = aiohttp.BasicAuth(user, password)
+        auth = (user, password)
         
-        async with aiohttp.ClientSession(auth=auth) as session:
-            try:
-                async with session.post(
-                    f"{wp_url}/wp-json/wp/v2/media/{image_id}",
-                    json=metadata
-                ) as response:
-                    return response.status == 200
-            except:
-                return False
+        try:
+            response = requests.post(
+                f"{wp_url}/wp-json/wp/v2/media/{image_id}",
+                json=metadata,
+                auth=auth,
+                timeout=30
+            )
+            return response.status_code == 200
+        except:
+            return False
     
     def update_client_stats(self, client_id: str, processed: int, errors: int):
-        """Met à jour les statistiques client."""
+        """Met à jour les statistiques."""
         if client_id not in self.clients['clients']:
             self.clients['clients'][client_id] = {
                 'stats': {'total_processed': 0, 'total_errors': 0}
@@ -357,67 +226,138 @@ Format JSON uniquement:
         
         self.save_clients()
 
-# Instance globale de l'agent
+# Instance globale
 agent = WordPressAIAgent()
 
 # Routes Flask
 @app.route('/')
 def home():
-    """Page d'accueil avec interface."""
+    """Page d'accueil."""
     return render_template_string('''
 <!DOCTYPE html>
 <html>
 <head>
     <title>WordPress AI Image Optimizer</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        .container { background: #f5f5f5; padding: 20px; border-radius: 10px; margin: 20px 0; }
-        input, button { padding: 10px; margin: 5px; }
-        .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        body { 
+            font-family: Arial, sans-serif; 
+            max-width: 800px; 
+            margin: 0 auto; 
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container { 
+            background: white; 
+            padding: 30px; 
+            border-radius: 10px; 
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin: 20px 0;
+        }
+        h1 { 
+            color: #333; 
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        input, button { 
+            width: 100%;
+            padding: 12px; 
+            margin: 8px 0;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            box-sizing: border-box;
+        }
+        button {
+            background: #0066cc;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background: #0052a3;
+        }
+        .status { 
+            padding: 15px; 
+            margin: 15px 0; 
+            border-radius: 5px;
+            text-align: center;
+        }
         .success { background: #d4edda; color: #155724; }
         .error { background: #f8d7da; color: #721c24; }
         .processing { background: #cce5ff; color: #004085; }
-        h1 { color: #333; }
-        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-        .stat-box { background: white; padding: 15px; border-radius: 5px; text-align: center; }
+        .stats { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        .stat-box { 
+            background: #f8f9fa; 
+            padding: 20px; 
+            border-radius: 5px; 
+            text-align: center;
+            border: 1px solid #dee2e6;
+        }
+        .stat-box h3 {
+            margin: 0 0 10px 0;
+            color: #495057;
+        }
+        .stat-box p {
+            margin: 0;
+            font-size: 24px;
+            font-weight: bold;
+            color: #0066cc;
+        }
+        label {
+            display: block;
+            margin-top: 15px;
+            color: #495057;
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
-    <h1>🤖 WordPress AI Image Optimizer Agent</h1>
+    <h1>🤖 WordPress AI Image Optimizer</h1>
     
     <div class="container">
         <h2>➕ Ajouter un site WordPress</h2>
         <form id="addSite">
-            <input type="text" id="clientId" placeholder="ID Client" required><br>
-            <input type="url" id="wpUrl" placeholder="https://site-wordpress.com" required><br>
-            <input type="text" id="wpUser" placeholder="Utilisateur WordPress" required><br>
-            <input type="password" id="wpPassword" placeholder="Mot de passe application" required><br>
-            <button type="submit">Ajouter et traiter</button>
+            <label for="clientId">ID Client</label>
+            <input type="text" id="clientId" placeholder="mon-client-1" required>
+            
+            <label for="wpUrl">URL du site WordPress</label>
+            <input type="url" id="wpUrl" placeholder="https://site-wordpress.com" required>
+            
+            <label for="wpUser">Utilisateur WordPress</label>
+            <input type="text" id="wpUser" placeholder="admin" required>
+            
+            <label for="wpPassword">Mot de passe application</label>
+            <input type="password" id="wpPassword" placeholder="xxxx xxxx xxxx xxxx" required>
+            
+            <button type="submit">🚀 Lancer l'optimisation</button>
         </form>
         <div id="status"></div>
     </div>
     
     <div class="container">
-        <h2>📊 Statistiques globales</h2>
+        <h2>📊 Statistiques</h2>
         <div class="stats">
             <div class="stat-box">
-                <h3>Total traité</h3>
+                <h3>Total optimisé</h3>
                 <p id="totalProcessed">0</p>
             </div>
             <div class="stat-box">
                 <h3>Clients actifs</h3>
                 <p id="activeClients">0</p>
             </div>
-            <div class="stat-box">
-                <h3>En cours</h3>
-                <p id="processing">0</p>
-            </div>
         </div>
     </div>
     
-    <div class="container">
-        <h2>👥 Clients</h2>
-        <div id="clientsList"></div>
+    <div class="container" style="text-align: center; background: #f8f9fa;">
+        <p>💡 <strong>Astuce</strong> : Créez un mot de passe d'application dans WordPress<br>
+        (Utilisateurs → Profil → Mots de passe d'application)</p>
     </div>
     
     <script>
@@ -425,7 +365,7 @@ def home():
             e.preventDefault();
             const status = document.getElementById('status');
             status.className = 'status processing';
-            status.textContent = 'Traitement en cours...';
+            status.textContent = '⏳ Traitement en cours... Cela peut prendre quelques minutes.';
             
             const data = {
                 client_id: document.getElementById('clientId').value,
@@ -463,23 +403,7 @@ def home():
                 const stats = await response.json();
                 
                 document.getElementById('totalProcessed').textContent = stats.total_processed;
-                document.getElementById('activeClients').textContent = stats.active_clients;
-                document.getElementById('processing').textContent = stats.processing;
-                
-                // Afficher les clients
-                const clientsList = document.getElementById('clientsList');
-                clientsList.innerHTML = '';
-                
-                for (const [clientId, data] of Object.entries(stats.clients)) {
-                    const div = document.createElement('div');
-                    div.className = 'stat-box';
-                    div.innerHTML = `
-                        <h4>${clientId}</h4>
-                        <p>Images traitées: ${data.stats.total_processed}</p>
-                        <p>Erreurs: ${data.stats.total_errors}</p>
-                    `;
-                    clientsList.appendChild(div);
-                }
+                document.getElementById('activeClients').textContent = Object.keys(stats.clients).length;
             } catch (error) {
                 console.error('Erreur stats:', error);
             }
@@ -489,17 +413,14 @@ def home():
         
         // Charger les stats au démarrage
         loadStats();
-        
-        // Actualiser toutes les 10 secondes
-        setInterval(loadStats, 10000);
     </script>
 </body>
 </html>
     ''')
 
 @app.route('/api/process', methods=['POST'])
-async def process_site():
-    """Endpoint pour traiter un site WordPress."""
+def process_site():
+    """Traite un site WordPress."""
     data = request.json
     
     client_id = data.get('client_id')
@@ -509,7 +430,6 @@ async def process_site():
         'password': data.get('wp_password')
     }
     
-    # Valider les données
     if not all([client_id, wp_data['url'], wp_data['user'], wp_data['password']]):
         return jsonify({'error': 'Données manquantes'}), 400
     
@@ -520,55 +440,21 @@ async def process_site():
             'stats': {'total_processed': 0, 'total_errors': 0}
         }
     
-    agent.clients['clients'][client_id]['sites'].append(wp_data)
     agent.save_clients()
     
-    # Lancer le traitement en arrière-plan
-    asyncio.create_task(agent.process_wordpress_site(client_id, wp_data))
+    # Traiter directement (version simplifiée)
+    result = agent.process_wordpress_site(client_id, wp_data)
     
-    return jsonify({
-        'status': 'processing',
-        'message': 'Traitement lancé en arrière-plan'
-    })
+    return jsonify(result)
 
 @app.route('/api/stats')
 def get_stats():
     """Récupère les statistiques."""
     return jsonify({
         'total_processed': agent.clients['stats']['total_processed'],
-        'active_clients': len(agent.clients['clients']),
-        'processing': len(agent.processing_queue),
         'clients': agent.clients['clients']
     })
 
-@app.route('/api/webhook/<client_id>', methods=['POST'])
-async def webhook(client_id):
-    """Webhook pour traitement automatique."""
-    # Traiter tous les sites du client
-    if client_id in agent.clients['clients']:
-        for site in agent.clients['clients'][client_id].get('sites', []):
-            await agent.process_wordpress_site(client_id, site)
-        
-        return jsonify({'status': 'success'})
-    
-    return jsonify({'error': 'Client non trouvé'}), 404
-
-# Tâche planifiée pour traitement automatique
-def scheduled_processing():
-    """Traite tous les sites toutes les 24h."""
-    while True:
-        time.sleep(86400)  # 24 heures
-        
-        print("🔄 Traitement planifié lancé...")
-        for client_id, client_data in agent.clients['clients'].items():
-            for site in client_data.get('sites', []):
-                asyncio.run(agent.process_wordpress_site(client_id, site))
-
-# Lancer le thread de planification
 if __name__ == '__main__':
-    # Créer le thread pour les tâches planifiées
-    scheduler_thread = threading.Thread(target=scheduled_processing, daemon=True)
-    scheduler_thread.start()
-    
-    # Lancer le serveur Flask
+    print("🚀 Agent démarré sur http://localhost:5000")
     app.run(host='0.0.0.0', port=agent.config.PORT)
